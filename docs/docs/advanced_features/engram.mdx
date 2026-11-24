@@ -93,6 +93,14 @@ all-reduce.
 - **`placement` `cpu`**: host RAM for the whole table across the node's ranks, and a longer load.
   With `replication` `none`, each rank maps its shard with 2 MiB transparent huge pages and logs
   the coverage it got; without them, lookups are several times slower.
+  Each rank reads its rows from the checkpoint file with large sequential reads from several
+  threads (`SGLANG_ENGRAM_LOAD_THREADS`, default 8, in blocks of `SGLANG_ENGRAM_LOAD_BLOCK_MB`,
+  default 16), because faulting them in out of the memory-mapped file is slow on a network
+  filesystem; `SGLANG_ENGRAM_LOAD_THREADS=0` copies out of the mapping instead. Before it
+  pre-faults a shard, SGLang also empties the page cache of every checkpoint file so the huge
+  pages can be allocated. That affects the whole host, a pre-warmed checkpoint included;
+  `SGLANG_ENGRAM_DROP_CHECKPOINT_CACHE=0` keeps the cache, and the shard may then get fewer huge
+  pages, which the coverage log line shows.
 - **`replication` `per_node`**: one shared memory file per TP group, which the other ranks open
   through `/proc`. The TP group must sit on one node (`--nnodes 1`) and the ranks must share a PID
   namespace. This mapping usually gets no huge pages unless shmem transparent huge pages are on.

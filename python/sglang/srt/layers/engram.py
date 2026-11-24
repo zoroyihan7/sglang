@@ -66,6 +66,7 @@ from sglang.srt.layers.dp_attention import (
     is_dp_gatherv_active,
     world_dp_gather_enabled,
 )
+from sglang.srt.layers.engram_checkpoint_read import read_checkpoint_rows
 from sglang.srt.layers.linear import ReplicatedLinear
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.utils.common import add_prefix
@@ -678,6 +679,13 @@ def _drop_page_cache_once(reason: str) -> None:
     if _page_cache_dropped:
         return
     _page_cache_dropped = True
+    if not envs.SGLANG_ENGRAM_DROP_CHECKPOINT_CACHE.get():
+        logger.info(
+            "engram host table: keeping the page cache of the checkpoint files "
+            "(SGLANG_ENGRAM_DROP_CHECKPOINT_CACHE=0) %s",
+            reason,
+        )
+        return
     files, nbytes = drop_checkpoint_page_cache()
     logger.info(
         "engram host table: dropped the page cache of %d checkpoint files (%.0f GiB) %s",
@@ -770,7 +778,8 @@ class _HostTable:
         self.bytes = torch.frombuffer(self.mm, dtype=torch.uint8)
         if not per_node:
             # Cached checkpoint pages, left by a previous server or by the loader,
-            # make the 512 MiB huge-page faults fall back, so empty them first.
+            # make the 512 MiB huge-page faults fall back, so empty them first
+            # (SGLANG_ENGRAM_DROP_CHECKPOINT_CACHE=0 keeps them).
             _drop_page_cache_once("before pre-faulting the per-rank shard")
             np.frombuffer(self.mm, dtype=np.uint8)[:: mmap.PAGESIZE] = 0
         if per_node:
@@ -832,7 +841,8 @@ class _HostTable:
         if not per_node and huge_kb < mapped_kb * 0.98:
             # The loader's own reads refilled the page cache; empty it again so the
             # collapse can find contiguous memory.
-            drop_checkpoint_page_cache()
+            if envs.SGLANG_ENGRAM_DROP_CHECKPOINT_CACHE.get():
+                drop_checkpoint_page_cache()
             self._collapse()
             mapped_kb, huge_kb = _huge_pages_backing(self.bytes.data_ptr())
         pct = 100.0 * huge_kb / mapped_kb if mapped_kb else 0.0
@@ -1420,9 +1430,14 @@ class EngramEmbedding(nn.Module):
             f"{dst.dtype} {tuple(dst.shape)}; an MXFP4 table needs "
             "quantization_config.engram_embed_quant = 'mxfp4'"
         )
-        dst.copy_(src)
-        if self.host_table is not None:
-            self.host_table.dirty = True
+        if self.host_table is None:
+            dst.copy_(src)
+            return
+        # Host tables are the large ones: read their rows from the checkpoint file in
+        # parallel instead of faulting them in out of its mapping.
+        if not read_checkpoint_rows(dst, src):
+            dst.copy_(src)
+        self.host_table.dirty = True
 
     def finish_load(self, label: str):
         """Collective in the shared layout and with peer shards: every rank calls

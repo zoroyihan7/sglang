@@ -2174,6 +2174,16 @@ class Envs:
     # Scheduler-side staging of shared host-table rows on GPUs without ATS
     # (engram_staging.py); pays off for large prefill batches.
     SGLANG_OPT_DSV41_ENGRAM_HOST_STAGING = EnvBool(False)
+    # Host-table Engram (--engram-config placement cpu) loading. Before a per-rank
+    # shard is pre-faulted into huge pages, posix_fadvise(DONTNEED) empties the page
+    # cache of every checkpoint file, host-wide; 0 keeps the cache (and with it any
+    # pre-warmed checkpoint) at the price of fewer guaranteed huge pages.
+    SGLANG_ENGRAM_DROP_CHECKPOINT_CACHE = EnvBool(True)
+    # Threads per rank that read the table rows from the checkpoint file with large
+    # sequential preads, in blocks of SGLANG_ENGRAM_LOAD_BLOCK_MB. 0 copies out of the
+    # checkpoint's mmap instead, which reads the file one fault at a time.
+    SGLANG_ENGRAM_LOAD_THREADS = EnvInt(8)
+    SGLANG_ENGRAM_LOAD_BLOCK_MB = EnvInt(16)
 
     # Kernels and indexer
     SGLANG_OPT_DEEPGEMM_HC_PRENORM = EnvBool(True)
